@@ -332,13 +332,62 @@ function setupCodeSessionExporter() {
   const statusDiv = createStatusDiv();
   const sessionId = window.location.pathname.split('/').filter(Boolean).pop();
 
+  function getCookie(name) {
+    const escaped = name.replace(/[.$?*|{}()[\]\\/+^]/g, '\\$&');
+    return document.cookie.match(new RegExp(`(?:^|; )${escaped}=([^;]*)`))?.[1];
+  }
+
+  // Best-effort lookup of an app-generated value the page persists in
+  // localStorage (keys/values vary, so match by key hint then by value shape).
+  function findStored(keyHints, valuePattern) {
+    try {
+      for (let i = 0; i < localStorage.length; i++) {
+        const key = localStorage.key(i) || '';
+        let value = localStorage.getItem(key) || '';
+        try { const parsed = JSON.parse(value); if (typeof parsed === 'string') value = parsed; } catch (_) {}
+        if (keyHints.some(h => key.toLowerCase().includes(h))) return value;
+        if (valuePattern) { const m = value.match(valuePattern); if (m) return m[0]; }
+      }
+    } catch (_) {}
+    return null;
+  }
+
+  // The /v1 API gateway routes/authorizes by these headers; a plain fetch
+  // without them gets a 404. We mirror the web app: static client headers
+  // plus the org id and telemetry ids the page already has.
+  function buildApiHeaders() {
+    const headers = {
+      'Accept': '*/*',
+      'Content-Type': 'application/json',
+      'anthropic-client-platform': 'web_claude_ai',
+      'anthropic-version': '2023-06-01',
+      'anthropic-client-version': '1.0.0'
+    };
+
+    const org = getCookie('lastActiveOrg');
+    if (org) headers['x-organization-uuid'] = decodeURIComponent(org);
+
+    const anonId = findStored(['anonymous-id', 'anonymousid'], /claudeai\.v1\.[0-9a-f-]{36}/i);
+    if (anonId) headers['anthropic-anonymous-id'] = anonId;
+
+    const deviceId = findStored(['device-id', 'deviceid', 'device_id'], null);
+    if (deviceId) headers['anthropic-device-id'] = deviceId;
+
+    return headers;
+  }
+
+  const API_HEADERS = buildApiHeaders();
+
   async function apiGet(path) {
     const response = await fetch(`${window.location.origin}${path}`, {
       credentials: 'include',
-      headers: { 'Accept': 'application/json' }
+      headers: API_HEADERS
     });
     if (!response.ok) {
-      throw new Error(`API ${response.status} for ${path}`);
+      const hint = response.status === 404
+        ? ' — the session API rejected the request; open the Code session while logged in and retry'
+        : '';
+      throw new Error(`API ${response.status} for ${path}${hint}`);
     }
     return response.json();
   }

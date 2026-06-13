@@ -42,6 +42,27 @@ function setupClaudeExporter() {
     });
   }
 
+  // This exporter only supports regular claude.ai chat conversations.
+  // Claude Code web sessions (URLs like /code/session_...) use a different
+  // page structure and API, so detect them and bail with a clear message
+  // instead of a confusing 400 + "No copy buttons found" failure.
+  function getUnsupportedPageReason() {
+    const path = window.location.pathname;
+    const id = path.split('/').pop() || '';
+
+    if (path.includes('/code/') || id.startsWith('session_')) {
+      return 'Claude Code web sessions are not supported. ' +
+        'Open a regular chat at claude.ai/chat/... and try again.';
+    }
+
+    if (!path.includes('/chat/')) {
+      return 'No Claude chat conversation detected on this page. ' +
+        'Open a conversation at claude.ai/chat/... and try again.';
+    }
+
+    return null;
+  }
+
   // Fetch conversation data from Claude API to get timestamps
   async function fetchConversationData() {
     try {
@@ -217,6 +238,12 @@ function setupClaudeExporter() {
 
   async function startExport() {
     try {
+      // Make sure we're on a supported page before doing any work
+      const unsupportedReason = getUnsupportedPageReason();
+      if (unsupportedReason) {
+        throw new Error(unsupportedReason);
+      }
+
       // Fetch conversation data from API (for timestamps and title)
       statusDiv.textContent = 'Fetching conversation data...';
       conversationData = await fetchConversationData();

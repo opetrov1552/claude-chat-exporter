@@ -251,6 +251,7 @@ This project benefits from:
 
 - **Requires JavaScript** - Must be enabled in browser
 - **Claude Web Only** - Works only on claude.ai web interface
+- **Regular Chats Only** - Supports `claude.ai/chat/...` conversations; Claude Code web sessions (`claude.ai/code/...`) use a different structure and are not supported
 - **Susceptible to DOM changes** - Interface changes may require updates to CSS selectors
 - **Visible Messages** - Only exports messages visible in DOM
 - **No Attachments** - Cannot export uploaded files or images

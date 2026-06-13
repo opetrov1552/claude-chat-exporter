@@ -2,12 +2,16 @@
 
 A JavaScript tool that exports Claude.ai conversations with **perfect markdown fidelity** by leveraging Claude's native copy functionality. Get complete conversations with both human and AI messages including tables, complex formatting, and all elements that Claude supports.
 
+It also exports **Claude Code web sessions** (`claude.ai/code/...`) — including tool calls — by reading the session transcript directly from Claude's API. The same script auto-detects which kind of page you're on and runs the right exporter.
+
 ## Features
 
 - **🎯 Perfect Markdown Fidelity** - Uses Claude's copy function for exact output
 - **📊 Complete Element Support** - Tables, math, complex formatting, everything
 - **🕐 Timestamps** - Human message timestamps fetched from Claude's API
 - **📁 Smart Filename Generation** - Uses actual conversation title from API
+- **🤖 Claude Code Sessions** - Exports `claude.ai/code/...` sessions (prompts, replies, and optional tool calls) from the session events API
+- **🔀 Auto-Routing** - One script handles both chat conversations and Code sessions
 - **🔧 Future-Proof** - Automatically supports new Claude markdown features
 - **📈 Real-Time Status** - Visual progress indicator during export
 - **🛡️ Robust Error Handling** - Comprehensive error detection and recovery
@@ -19,6 +23,26 @@ A JavaScript tool that exports Claude.ai conversations with **perfect markdown f
 2. **Human Messages** - Identifies human message action bars (those *without* a thumbs-up feedback button) and clicks their copy buttons; captures each clipboard write via an intercepted `navigator.clipboard.writeText`
 3. **Claude Responses** - Identifies Claude response action bars (those *with* a thumbs-up feedback button) and clicks their copy buttons; captures each clipboard write the same way
 4. **Perfect Output** - Combines both sets of captured content into a single markdown file, with timestamps on human message headers when available
+
+### Claude Code Sessions
+
+For `claude.ai/code/...` sessions the copy-button approach doesn't apply — the transcript is virtualized (off-screen messages aren't in the DOM) and there are no chat-style action bars. Instead, the script reads the session directly from Claude's API:
+
+1. **Session metadata** - `GET /v1/sessions/{id}` for the title and model
+2. **Full transcript** - `GET /v1/sessions/{id}/events?limit=500&after_id=...`, paginated until every event is fetched
+3. **Markdown** - Human prompts and Claude's text replies, with compact one-line markers for each tool call (e.g. `🔧 Bash: npm test`)
+
+What gets included is controlled by an `OPTIONS` block at the top of `setupCodeSessionExporter`:
+
+```javascript
+const OPTIONS = {
+  includeThinking: false,     // Claude's extended-thinking blocks
+  includeToolCalls: true,     // compact one-line markers for each tool call
+  includeToolResults: false   // raw tool output (verbose; off by default)
+};
+```
+
+Tool results are off by default because they can be 10× the size of the conversation itself. Flip these toggles before pasting the script if you want a fuller record.
 
 ### Why Copy Button Approach?
 
@@ -250,8 +274,8 @@ This project benefits from:
 ## Limitations
 
 - **Requires JavaScript** - Must be enabled in browser
-- **Claude Web Only** - Works only on claude.ai web interface
-- **Regular Chats Only** - Supports `claude.ai/chat/...` conversations; Claude Code web sessions (`claude.ai/code/...`) use a different structure and are not supported
+- **Claude Web Only** - Works only on claude.ai web interface (`/chat/...` conversations and `/code/...` Code sessions)
+- **Code Session Fidelity** - Code sessions are reconstructed from the events API (text + tool calls), not Claude's copy output, so very unusual formatting may differ slightly from the live view
 - **Susceptible to DOM changes** - Interface changes may require updates to CSS selectors
 - **Visible Messages** - Only exports messages visible in DOM
 - **No Attachments** - Cannot export uploaded files or images

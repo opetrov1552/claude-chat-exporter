@@ -44,6 +44,22 @@ const OPTIONS = {
 
 Tool results are off by default because they can be 10× the size of the conversation itself. Flip these toggles before pasting the script if you want a fuller record.
 
+### Bonus: Collecting Files From a Code Session
+
+A second, standalone script — **`claude-code-files-exporter.js`** — recovers the **contents of files** that a Claude Code session touched (the `.md` docs it wrote/edited, by default), straight from the same events API. File contents live in the transcript as `Write` inputs (raw), `Read` results (line-numbered), and `Edit` fragments, so for each file it takes the latest full snapshot and replays the edits made after it.
+
+The downloaded bundle includes **provenance** for each file: whether it was created during the session or pre-existing, how many `Write`/`Edit`/`Read` operations touched it, and a change history grouped by **which of your messages** ("Turn N") triggered each batch of edits. Configure it via its own `OPTIONS` block:
+
+```javascript
+const OPTIONS = {
+  extensions: ['.md'],     // only collect files ending in these; [] / null = all files
+  includeProvenance: true, // per-file origin + change history grouped by your turns
+  localTime: false         // false = UTC timestamps, true = your browser's local time
+};
+```
+
+Files that were only edited via fragments (never read or written in full) can't be reconstructed and are flagged `[no-base]`; files where an edit no longer matches are flagged `[partial]`.
+
 ### Why Copy Button Approach?
 
 Instead of manually parsing HTML and converting to markdown (which misses tables and complex elements), this tool uses **Claude's own copy button** to ensure 100% accurate markdown output for all message types.

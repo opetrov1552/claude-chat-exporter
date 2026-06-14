@@ -319,14 +319,27 @@ function setupClaudeExporter() {
 // Code sessions don't expose the chat copy buttons and their transcript is
 // virtualized (off-screen messages aren't in the DOM), so we read the full
 // transcript straight from the session events API instead.
+//
+// Two outputs from one run (the second is optional, see OPTIONS):
+//   1. the conversation transcript (human prompts + Claude replies + tools)
+//   2. a bundle of the files the session touched (.md by default),
+//      reconstructed from the transcript with provenance
 // ---------------------------------------------------------------------------
 
 function setupCodeSessionExporter() {
-  // Toggle what ends up in the exported markdown.
+  // Toggle what ends up in the exports.
   const OPTIONS = {
+    // --- transcript ---
     includeThinking: false,     // Claude's extended-thinking blocks
     includeToolCalls: true,     // compact one-line markers for each tool call
-    includeToolResults: false   // raw tool output (verbose; off by default)
+    includeToolResults: false,  // raw tool output (verbose; off by default)
+
+    // --- file bundle (also download the contents of files the session
+    //     touched, reconstructed from Write/Read/Edit events) ---
+    exportFiles: true,          // set false to export only the transcript
+    fileExtensions: ['.md'],    // which files to collect; [] / null = all files
+    fileProvenance: true,       // per-file origin + change history by your turns
+    localTime: false            // bundle timestamps: false = UTC, true = local
   };
 
   const statusDiv = createStatusDiv();
@@ -524,6 +537,197 @@ function setupCodeSessionExporter() {
     return md;
   }
 
+  // ---- File bundle helpers ---------------------------------------------
+  // File contents live in the transcript as Write inputs (raw), Read results
+  // ("cat -n" line-numbered), and Edit fragments. For each file we take the
+  // latest full snapshot and replay the edits made after it.
+
+  function matchesExt(path) {
+    const ex = OPTIONS.fileExtensions;
+    if (!ex || ex.length === 0) return true;
+    const lower = path.toLowerCase();
+    return ex.some(e => lower.endsWith(e.toLowerCase()));
+  }
+
+  function stripLineNumbers(text) {
+    return String(text).split('\n').map(l => l.replace(/^\s*\d+\t/, '')).join('\n');
+  }
+
+  function oneLine(s, n = 72) {
+    s = (s || '').replace(/\s+/g, ' ').trim();
+    return s.length > n ? `${s.slice(0, n)}…` : s;
+  }
+
+  function fmtTime(iso) {
+    const d = new Date(iso);
+    if (OPTIONS.localTime) {
+      return d.toLocaleString([], { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+    }
+    const p = n => String(n).padStart(2, '0');
+    return `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())} ${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  }
+
+  function shortTime(iso) {
+    const d = new Date(iso);
+    const p = n => String(n).padStart(2, '0');
+    return OPTIONS.localTime ? `${p(d.getHours())}:${p(d.getMinutes())}` : `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`;
+  }
+
+  // Harness-injected user-role messages that aren't things you typed.
+  const INJECTED = /^\s*(<github-webhook-activity>|<task-notification>|<system-reminder>|<local-command|<command-(name|message|args|stdout|stderr)>|<bash-|<user-prompt-submit-hook>|Caveat:)/;
+  function isGenuineTurn(ev) {
+    return isHumanMessage(ev) && !INJECTED.test(humanText(ev));
+  }
+
+  function collectFiles(events) {
+    const sorted = [...events].sort((a, b) => (a?.created_at || '').localeCompare(b?.created_at || ''));
+
+    // tool_use id -> result text (results arrive as user-role tool_result blocks)
+    const results = new Map();
+    for (const ev of sorted) {
+      if (ev?.type !== 'user' || !Array.isArray(ev.message?.content)) continue;
+      for (const blk of ev.message.content) {
+        if (blk?.type !== 'tool_result') continue;
+        let c = blk.content;
+        if (Array.isArray(c)) c = c.map(x => (typeof x === 'string' ? x : x?.text ?? '')).join('\n');
+        results.set(blk.tool_use_id, String(c ?? ''));
+      }
+    }
+
+    // your genuine messages, for provenance attribution
+    const turns = [];
+    for (const ev of sorted) if (isGenuineTurn(ev)) turns.push({ ts: ev.created_at, preview: oneLine(humanText(ev)) });
+    const turnAt = ts => {
+      let idx = -1;
+      for (let i = 0; i < turns.length; i++) { if (turns[i].ts <= ts) idx = i; else break; }
+      return idx;
+    };
+
+    const files = {}; // path -> { ops, hist }
+    const ensure = p => (files[p] ||= { ops: [], hist: [] });
+
+    for (const ev of sorted) {
+      if (ev?.type !== 'assistant' || !Array.isArray(ev.message?.content)) continue;
+      for (const blk of ev.message.content) {
+        if (blk?.type !== 'tool_use') continue;
+        const input = blk.input || {};
+        const path = input.file_path;
+        if (!path || !matchesExt(path)) continue;
+        const f = ensure(path);
+
+        if (blk.name === 'Write') {
+          f.ops.push({ kind: 'snapshot', text: String(input.content ?? '') });
+          f.hist.push({ ts: ev.created_at, op: 'Write' });
+        } else if (blk.name === 'Read') {
+          const r = results.get(blk.id);
+          if (r != null) f.ops.push({ kind: 'snapshot', text: stripLineNumbers(r) });
+          f.hist.push({ ts: ev.created_at, op: 'Read' });
+        } else if (blk.name === 'Edit') {
+          f.ops.push({ kind: 'edit', edits: [{ oldStr: input.old_string ?? '', newStr: input.new_string ?? '', all: !!input.replace_all }] });
+          f.hist.push({ ts: ev.created_at, op: 'Edit' });
+        } else if (blk.name === 'MultiEdit' && Array.isArray(input.edits)) {
+          f.ops.push({ kind: 'edit', edits: input.edits.map(e => ({ oldStr: e.old_string ?? '', newStr: e.new_string ?? '', all: !!e.replace_all })) });
+          f.hist.push({ ts: ev.created_at, op: 'Edit' });
+        }
+      }
+    }
+
+    // reconstruct: latest snapshot + replay later edits
+    for (const path of Object.keys(files)) {
+      const ops = files[path].ops;
+      let baseIdx = -1;
+      for (let i = ops.length - 1; i >= 0; i--) { if (ops[i].kind === 'snapshot') { baseIdx = i; break; } }
+      if (baseIdx < 0) { files[path].status = 'no-base'; files[path].content = null; continue; }
+
+      let content = ops[baseIdx].text;
+      let conflicts = 0;
+      for (let i = baseIdx + 1; i < ops.length; i++) {
+        const o = ops[i];
+        if (o.kind === 'snapshot') { content = o.text; continue; }
+        for (const e of o.edits) {
+          if (e.oldStr === '') continue;
+          if (content.includes(e.oldStr)) {
+            content = e.all ? content.split(e.oldStr).join(e.newStr) : content.replace(e.oldStr, e.newStr);
+          } else {
+            conflicts++;
+          }
+        }
+      }
+      files[path].status = conflicts > 0 ? `partial (${conflicts} edit(s) not applied)` : 'ok';
+      files[path].content = content;
+    }
+
+    return { files, turns, turnAt };
+  }
+
+  function buildFileBundle(meta, data) {
+    const { files, turns, turnAt } = data;
+    const title = (meta?.title || 'Claude Code session').trim();
+    const paths = Object.keys(files).sort((a, b) => {
+      const rank = p => (p.startsWith('/home/') ? 0 : 1);
+      return (rank(a) - rank(b)) || a.localeCompare(b);
+    });
+
+    let md = `# Files from session: ${title}\n`;
+    md += `# Reconstructed from the Claude Code transcript${OPTIONS.fileProvenance ? ' with provenance' : ''}.\n`;
+    md += `# Times are ${OPTIONS.localTime ? 'local' : 'UTC'}. "Turn N" = your N-th genuine message.\n`;
+    md += `# Files: ${paths.length}  |  Your turns: ${turns.length}\n\n`;
+
+    if (OPTIONS.fileProvenance) {
+      md += `## Your messages (turns)\n`;
+      turns.forEach((t, i) => { md += `- Turn ${i + 1} — ${fmtTime(t.ts)} — ${t.preview}\n`; });
+      md += `\n`;
+    }
+
+    md += `## Files\n`;
+    for (const p of paths) md += `- ${p}${files[p].status === 'ok' ? '' : `  [${files[p].status}]`}\n`;
+    md += `\n`;
+
+    const SEP = '='.repeat(72);
+    for (const p of paths) {
+      const f = files[p];
+      md += `\n${SEP}\nFILE: ${p}${f.status === 'ok' ? '' : `   [${f.status}]`}\n${SEP}\n`;
+
+      if (OPTIONS.fileProvenance) {
+        const writes = f.hist.filter(x => x.op === 'Write').length;
+        const edits = f.hist.filter(x => x.op === 'Edit').length;
+        const reads = f.hist.filter(x => x.op === 'Read').length;
+        const changes = f.hist.filter(x => x.op !== 'Read');
+        const firstRead = f.hist.find(x => x.op === 'Read');
+        const origin = changes.length && (!firstRead || changes[0].ts <= firstRead.ts)
+          ? 'created during session'
+          : (firstRead ? 'pre-existing (first read in session)' : 'unknown');
+
+        md += `Origin     : ${origin}\n`;
+        md += `Operations : ${writes} Write, ${edits} Edit, ${reads} Read\n`;
+
+        if (changes.length) {
+          const groups = [];
+          for (const c of changes) {
+            const ti = turnAt(c.ts);
+            const g = groups[groups.length - 1];
+            if (g && g.ti === ti) { g.end = c.ts; g.kinds[c.op] = (g.kinds[c.op] || 0) + 1; }
+            else groups.push({ ti, start: c.ts, end: c.ts, kinds: { [c.op]: 1 } });
+          }
+          md += `Changed in :\n`;
+          for (const g of groups) {
+            const span = shortTime(g.start) === shortTime(g.end) ? fmtTime(g.start) : `${fmtTime(g.start)}–${shortTime(g.end)}`;
+            const kinds = Object.entries(g.kinds).map(([k, v]) => `${v}× ${k}`).join(', ');
+            const label = g.ti >= 0 ? `Turn ${g.ti + 1}: ${turns[g.ti].preview}` : '(before your first message / automation)';
+            md += `  • ${span}  [${kinds}]  ${label}\n`;
+          }
+        }
+      }
+
+      md += `\n----- content -----\n\n`;
+      md += f.content == null
+        ? `(content not available — only edited via fragments, never read or written in full)\n`
+        : `${f.content.replace(/\s+$/, '')}\n`;
+    }
+
+    return md;
+  }
+
   async function startExport() {
     try {
       if (!sessionId || !sessionId.startsWith('session_')) {
@@ -539,14 +743,36 @@ function setupCodeSessionExporter() {
       }
       console.log(`📜 Fetched ${events.length} events`);
 
-      statusDiv.textContent = 'Building markdown…';
-      const markdown = buildMarkdown(meta, events);
-
       const stem = sanitizeFilename(meta?.title || sessionId);
-      const filename = `${stem}.md`;
-      downloadMarkdown(markdown, filename);
 
-      statusDiv.textContent = `✅ Downloaded: ${filename}`;
+      // 1) transcript
+      statusDiv.textContent = 'Building transcript…';
+      const transcriptName = `${stem}.md`;
+      downloadMarkdown(buildMarkdown(meta, events), transcriptName);
+      console.log(`📄 ${transcriptName}`);
+      const downloaded = [transcriptName];
+
+      // 2) file bundle (optional)
+      if (OPTIONS.exportFiles) {
+        statusDiv.textContent = 'Reconstructing files…';
+        const data = collectFiles(events);
+        const count = Object.keys(data.files).length;
+        if (count > 0) {
+          const suffix = OPTIONS.fileExtensions && OPTIONS.fileExtensions.length === 1
+            ? `${OPTIONS.fileExtensions[0].replace(/^\./, '')}_files`
+            : 'file_bundle';
+          const bundleName = `${stem}__${suffix}.md`;
+          await new Promise(r => setTimeout(r, 400)); // let the first download settle
+          downloadMarkdown(buildFileBundle(meta, data), bundleName);
+          console.log(`📦 ${bundleName} (${count} file(s))`);
+          downloaded.push(bundleName);
+        } else {
+          const want = OPTIONS.fileExtensions?.length ? OPTIONS.fileExtensions.join(', ') : '(any)';
+          console.log(`📦 No files matching ${want} — skipping bundle`);
+        }
+      }
+
+      statusDiv.textContent = `✅ Downloaded: ${downloaded.join(' + ')}`;
       statusDiv.style.background = '#4CAF50';
       console.log('🎉 Export complete!');
     } catch (error) {

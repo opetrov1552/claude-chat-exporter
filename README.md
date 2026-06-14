@@ -32,33 +32,30 @@ For `claude.ai/code/...` sessions the copy-button approach doesn't apply — the
 2. **Full transcript** - `GET /v1/sessions/{id}/events?limit=500&after_id=...`, paginated until every event is fetched
 3. **Markdown** - Human prompts and Claude's text replies, with compact one-line markers for each tool call (e.g. `🔧 Bash: npm test`)
 
-What gets included is controlled by an `OPTIONS` block at the top of `setupCodeSessionExporter`:
+In addition to the transcript, the same run can collect the **contents of files** the session touched (see "File bundle" below). Both outputs are controlled by one `OPTIONS` block at the top of `setupCodeSessionExporter`:
 
 ```javascript
 const OPTIONS = {
+  // transcript
   includeThinking: false,     // Claude's extended-thinking blocks
   includeToolCalls: true,     // compact one-line markers for each tool call
-  includeToolResults: false   // raw tool output (verbose; off by default)
+  includeToolResults: false,  // raw tool output (verbose; off by default)
+
+  // file bundle (also download the contents of files the session touched)
+  exportFiles: true,          // set false to export only the transcript
+  fileExtensions: ['.md'],    // which files to collect; [] / null = all files
+  fileProvenance: true,       // per-file origin + change history by your turns
+  localTime: false            // bundle timestamps: false = UTC, true = local
 };
 ```
 
 Tool results are off by default because they can be 10× the size of the conversation itself. Flip these toggles before pasting the script if you want a fuller record.
 
-### Bonus: Collecting Files From a Code Session
+#### File bundle
 
-A second, standalone script — **`claude-code-files-exporter.js`** — recovers the **contents of files** that a Claude Code session touched (the `.md` docs it wrote/edited, by default), straight from the same events API. File contents live in the transcript as `Write` inputs (raw), `Read` results (line-numbered), and `Edit` fragments, so for each file it takes the latest full snapshot and replays the edits made after it.
+When `exportFiles` is on, a Code-session export also downloads a second markdown file with the **contents of files** the session touched (`.md` by default). File contents live in the transcript as `Write` inputs (raw), `Read` results (line-numbered), and `Edit` fragments, so for each file the script takes the latest full snapshot and replays the edits made after it.
 
-The downloaded bundle includes **provenance** for each file: whether it was created during the session or pre-existing, how many `Write`/`Edit`/`Read` operations touched it, and a change history grouped by **which of your messages** ("Turn N") triggered each batch of edits. Configure it via its own `OPTIONS` block:
-
-```javascript
-const OPTIONS = {
-  extensions: ['.md'],     // only collect files ending in these; [] / null = all files
-  includeProvenance: true, // per-file origin + change history grouped by your turns
-  localTime: false         // false = UTC timestamps, true = your browser's local time
-};
-```
-
-Files that were only edited via fragments (never read or written in full) can't be reconstructed and are flagged `[no-base]`; files where an edit no longer matches are flagged `[partial]`.
+Each file is annotated with **provenance**: whether it was created during the session or pre-existing, how many `Write`/`Edit`/`Read` operations touched it, and a change history grouped by **which of your messages** ("Turn N") triggered each batch of edits. Files that were only edited via fragments (never read or written in full) can't be reconstructed and are flagged `[no-base]`; files where an edit no longer matches are flagged `[partial]`.
 
 ### Why Copy Button Approach?
 

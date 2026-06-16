@@ -333,6 +333,7 @@ function setupCodeSessionExporter() {
     includeThinking: false,     // Claude's extended-thinking blocks
     includeToolCalls: true,     // compact one-line markers for each tool call
     includeToolResults: false,  // raw tool output (verbose; off by default)
+    includeQuestions: true,     // AskUserQuestion prompts + the answer you picked
 
     // --- file bundle (also download the contents of files the session
     //     touched, reconstructed from Write/Read/Edit events) ---
@@ -463,13 +464,35 @@ function setupCodeSessionExporter() {
     return brief.length > 100 ? `${brief.slice(0, 100)}…` : brief;
   }
 
-  function toolResultText(block) {
+  function resultToText(block) {
     let content = block?.content;
     if (Array.isArray(content)) {
       content = content.map(c => (typeof c === 'string' ? c : c?.text ?? '')).join('\n');
     }
-    content = String(content ?? '');
+    return String(content ?? '');
+  }
+
+  function toolResultText(block) {
+    const content = resultToText(block);
     return content.length > 1500 ? `${content.slice(0, 1500)}\n…(truncated)` : content;
+  }
+
+  // AskUserQuestion is an interactive prompt: render the question(s) + options
+  // and the answer you picked (which arrives in the paired tool_result).
+  function renderQuestionBlock(input, answerText) {
+    const questions = Array.isArray(input?.questions) ? input.questions : [];
+    let s = `**❓ Claude asked you:**\n\n`;
+    for (const q of questions) {
+      const head = q?.header ? `[${q.header}] ` : '';
+      s += `- **${head}${(q?.question || '').trim()}**\n`;
+      const options = Array.isArray(q?.options) ? q.options : [];
+      for (const o of options) {
+        s += `  - ${o?.label ?? ''}${o?.description ? ` — ${o.description}` : ''}\n`;
+      }
+    }
+    const answer = (answerText || '').replace(/^Your questions have been answered:\s*/i, '').trim();
+    s += `\n**✅ Your answer:** ${answer || '(no answer recorded)'}\n\n`;
+    return s;
   }
 
   function buildMarkdown(meta, events) {
@@ -482,6 +505,18 @@ function setupCodeSessionExporter() {
 
     let md = `# ${title}\n\n`;
     if (model) md += `_Model: ${model}_\n\n`;
+
+    // Pair tool results back to their tool_use id (results are user-role
+    // events that arrive after the call) so AskUserQuestion answers can be
+    // rendered next to their question.
+    const resultRaw = new Map();
+    for (const ev of sorted) {
+      if (ev?.type !== 'user' || !Array.isArray(ev.message?.content)) continue;
+      for (const b of ev.message.content) {
+        if (b?.type === 'tool_result') resultRaw.set(b.tool_use_id, resultToText(b));
+      }
+    }
+    const renderedAnswerIds = new Set();
 
     let wroteSection = false;  // have we emitted any turn yet?
     let inClaude = false;      // are we currently inside a Claude response?
@@ -515,6 +550,10 @@ function setupCodeSessionExporter() {
             ensureClaudeHeader();
             const quoted = block.thinking.trim().split('\n').map(l => `> ${l}`).join('\n');
             md += `> 💭 _Thinking:_\n>\n${quoted}\n\n`;
+          } else if (block.type === 'tool_use' && block.name === 'AskUserQuestion' && OPTIONS.includeQuestions) {
+            ensureClaudeHeader();
+            renderedAnswerIds.add(block.id);
+            md += renderQuestionBlock(block.input, resultRaw.get(block.id));
           } else if (block.type === 'tool_use' && OPTIONS.includeToolCalls) {
             ensureClaudeHeader();
             const brief = toolBrief(block.input);
@@ -527,6 +566,7 @@ function setupCodeSessionExporter() {
       if (OPTIONS.includeToolResults && ev?.type === 'user' && Array.isArray(ev.message?.content)) {
         const results = ev.message.content.filter(b => b?.type === 'tool_result');
         for (const result of results) {
+          if (renderedAnswerIds.has(result.tool_use_id)) continue; // already shown with its question
           ensureClaudeHeader();
           md += '```\n' + toolResultText(result) + '\n```\n\n';
         }

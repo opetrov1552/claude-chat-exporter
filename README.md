@@ -30,7 +30,7 @@ For `claude.ai/code/...` sessions the copy-button approach doesn't apply — the
 
 1. **Session metadata** - `GET /v1/sessions/{id}` for the title and model
 2. **Full transcript** - `GET /v1/sessions/{id}/events?limit=500&after_id=...`, paginated until every event is fetched
-3. **Markdown** - Human prompts and Claude's text replies, with compact one-line markers for each tool call (e.g. `🔧 Bash: npm test`)
+3. **Markdown** - Human prompts and Claude's text replies, with compact one-line markers for each tool call (e.g. `🔧 Bash: npm test`). Interactive `AskUserQuestion` prompts are rendered in full — the question, its options, and the answer you selected — so decisions made mid-session aren't lost.
 
 In addition to the transcript, the same run can collect the **contents of files** the session touched (see "File bundle" below). Both outputs are controlled by one `OPTIONS` block at the top of `setupCodeSessionExporter`:
 
@@ -40,6 +40,7 @@ const OPTIONS = {
   includeThinking: false,     // Claude's extended-thinking blocks
   includeToolCalls: true,     // compact one-line markers for each tool call
   includeToolResults: false,  // raw tool output (verbose; off by default)
+  includeQuestions: true,     // AskUserQuestion prompts + the answer you picked
 
   // file bundle (also download the contents of files the session touched)
   exportFiles: true,          // set false to export only the transcript
